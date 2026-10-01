@@ -29,15 +29,19 @@ def test_idempotency_check_skips_duplicates():
             ]
         }
 
+        mock_commit = AsyncMock()
+
         # First call: is new -> processed
-        res1 = await process_transcript(event, mock_redis, mock_extractor)
+        res1 = await process_transcript(event, mock_redis, mock_extractor, commit_fn=mock_commit)
         assert res1 is True
         assert mock_extractor.extract_context.call_count == 1
+        assert mock_commit.call_count == 1
 
         # Second call: duplicate key -> skipped without invoking extractor
-        res2 = await process_transcript(event, mock_redis, mock_extractor)
+        res2 = await process_transcript(event, mock_redis, mock_extractor, commit_fn=mock_commit)
         assert res2 is True
         assert mock_extractor.extract_context.call_count == 1  # Unchanged!
+        assert mock_commit.call_count == 1  # No duplicate commit!
 
     asyncio.run(_test())
 

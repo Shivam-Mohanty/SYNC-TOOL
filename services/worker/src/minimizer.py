@@ -4,12 +4,27 @@ from typing import List, Optional, Dict, Any
 BUDGET_TOKENS = 6_000
 AVG_CHARS_PER_TOKEN = 4
 
-# Patterns that reliably indicate no architectural content (greetings, simple queries, syntax errors)
+# Patterns that reliably indicate non-architectural content (greetings, simple queries, syntax errors, filler)
 TRIVIAL_PATTERNS = re.compile(
-    r"^(hi|hello|hey|thanks|thank you|thx|ok|okay|sure|yes|no|got it|sounds good|"
-    r"can you (fix|update|change|rename)|please (fix|format|indent)|"
-    r"what (is|does|are)|how (do|does|to)|explain|"
-    r"syntax error|type error|undefined|import error)",
+    r"^(hi|hello|hey|good (morning|afternoon|evening)|howdy|greetings|"
+    r"thanks|thank you|thx|many thanks|ok|okay|sure|yes|yeah|yep|no|nope|got it|sounds good|understood|"
+    r"you('re| are) welcome|happy to help|glad to hear|no problem|anytime|great|done|here (is|are)|sure thing|"
+    r"sorry|my mistake|apologies|never mind|nevermind|"
+    r"can you (fix|update|change|rename|explain)|please (fix|format|indent|update|explain)|"
+    r"what (is|does|are|do)|how (do|does|to|can)|explain|"
+    r"syntax error|type error|undefined|import error|reference error|"
+    r"this error occurs|you need to|run git|here is|here are|awesome|glad)",
+    re.IGNORECASE
+)
+
+# Architectural keywords: if present, the turn is considered meaningful architectural context
+ARCHITECTURAL_MARKERS = re.compile(
+    r"\b(component|decision|constraint|task|architecture|database|storage|"
+    r"postgresql|postgres|apache age|\bage graph\b|cypher|redis stream|redis streams|kafka|vault transit|"
+    r"hashicorp vault|cloud kms|\bkms\b|\bdek\b|\bkek\b|envelope encryption|aes-256-gcm|wipebytes|"
+    r"graphql|grpc|pgvector|text-embedding-3-small|embedding vector|hnsw|"
+    r"context_commits|mutation_version|liveblocks|p99 ttft|sse stream|streamgate|"
+    r"api gateway proxy)\b",
     re.IGNORECASE
 )
 
@@ -21,7 +36,7 @@ def minimize_transcript(
     """
     Minimizes the transcript prior to sending it to the extraction LLM:
     1. System-strip: drop all system-role turns
-    2. Heuristic filter: drop turns matching TRIVIAL_PATTERNS
+    2. Heuristic filter: drop turns matching TRIVIAL_PATTERNS and conversational Q&A without architecture markers
     3. Delta trimmer: keep only turns newer than last extraction commit
     4. Token budget cap: truncate oldest turns until estimated tokens <= budget
     """
@@ -29,13 +44,32 @@ def minimize_transcript(
         return []
 
     # 1. Strip system turns
-    filtered = [t for t in turns if t.get("role", "").lower() != "system"]
+    stripped = [t for t in turns if t.get("role", "").lower() != "system"]
 
-    # 2. Heuristic filter: drop trivially non-architectural turns
-    filtered = [
-        t for t in filtered
-        if not TRIVIAL_PATTERNS.match(t.get("content", "").strip()[:120])
-    ]
+    # 2. Heuristic filter: identify trivial queries and conversational turns
+    filtered = []
+    in_trivial_block = False
+
+    for t in stripped:
+        content = t.get("content", "").strip()
+        role = t.get("role", "user").lower()
+        is_trivial = bool(TRIVIAL_PATTERNS.match(content[:120]))
+        has_arch = bool(ARCHITECTURAL_MARKERS.search(content))
+
+        if has_arch:
+            in_trivial_block = False
+            filtered.append(t)
+            continue
+
+        if is_trivial:
+            in_trivial_block = True
+            continue
+
+        if in_trivial_block:
+            # Continue dropping assistant/user replies within a trivial Q&A thread until architecture is discussed
+            continue
+
+        filtered.append(t)
 
     # 3. Delta trim: only turns after last extraction commit on this branch
     if last_extraction_ts is not None:

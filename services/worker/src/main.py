@@ -4,7 +4,7 @@ import logging
 import os
 import signal
 import sys
-from typing import Optional
+from typing import Optional, Any
 import redis.asyncio as aioredis
 
 from .config import config
@@ -12,6 +12,12 @@ from .models import ContextExtractionResult
 from .minimizer import minimize_transcript, format_turns_for_llm
 from .extractor import ContextExtractor
 from .storage.graph import get_last_extraction_ts, commit_to_graph_and_vector
+
+if sys.platform == "win32":
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except Exception:
+        pass
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,7 +28,8 @@ logger = logging.getLogger("worker")
 async def process_transcript(
     event: dict,
     redis_client: aioredis.Redis,
-    extractor: ContextExtractor
+    extractor: ContextExtractor,
+    commit_fn: Optional[Any] = None
 ) -> bool:
     """
     Processes a single transcript event:
@@ -58,13 +65,22 @@ async def process_transcript(
         logger.info("No meaningful architectural context found in transcript; graph untouched")
         return True
 
-    await commit_to_graph_and_vector(
-        workspace_id=workspace_id,
-        branch_id=branch_id,
-        transcript_id=event.get("transcript_id", ""),
-        extraction=result,
-        org_id=event.get("org_id", workspace_id)
-    )
+    if commit_fn is not None:
+        await commit_fn(
+            workspace_id=workspace_id,
+            branch_id=branch_id,
+            transcript_id=event.get("transcript_id", ""),
+            extraction=result,
+            org_id=event.get("org_id", workspace_id)
+        )
+    else:
+        await commit_to_graph_and_vector(
+            workspace_id=workspace_id,
+            branch_id=branch_id,
+            transcript_id=event.get("transcript_id", ""),
+            extraction=result,
+            org_id=event.get("org_id", workspace_id)
+        )
     return True
 
 async def worker_loop(
